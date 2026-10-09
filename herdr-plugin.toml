@@ -1,0 +1,21 @@
+id = "matiaz.pulse"
+name = "Pulse"
+version = "0.1.0"
+min_herdr_version = "0.9.3"
+description = "A side dock for Herdr: GitHub and Claude Code activity heatmap, the pull requests waiting on you, and git status with one-tap AI commit messages."
+platforms = ["linux", "macos"]
+
+[[panes]]
+id = "dock"
+title = "Pulse"
+placement = "split"
+command = ["sh", "bin/run.sh", "app.mjs"]
+
+[[actions]]
+id = "toggle"
+title = "Pulse: toggle dock"
+contexts = ["workspace", "tab", "pane"]
+command = ["sh", "bin/run.sh", "dock.mjs"]
+
+[[startup]]
+command = ["sh", "bin/run.sh", "dock.mjs", "open"]

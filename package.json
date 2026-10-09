@@ -1,0 +1,11 @@
+{
+  "name": "herdr-pulse",
+  "version": "0.1.0",
+  "description": "A side dock for Herdr: activity heatmap, pull requests waiting on you, and git status with one-tap AI commit messages.",
+  "license": "MIT",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  }
+}
