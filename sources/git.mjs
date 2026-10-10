@@ -7,6 +7,7 @@ const HERDR = process.env.HERDR_BIN_PATH || "herdr";
 const MAX_DIFF_CHARS = 24000;
 const CLAUDE_TIMEOUT_MS = 90 * 1000;
 const COMMIT_TIMEOUT_MS = 2 * 60 * 1000;
+const PUSH_TIMEOUT_MS = 2 * 60 * 1000;
 const SYSTEM_PROMPT = "You write git commit messages. Reply with one or two short sentences describing the change, in plain text. No quotes, no prefix, no markdown, no trailing explanation.";
 const GIT_ENV = { ...process.env, GIT_OPTIONAL_LOCKS: "0", GIT_TERMINAL_PROMPT: "0" };
 const PRIVATE_PATHS = ["**/.env*", "**/*.pem", "**/*.key", "**/*.p12", "**/id_rsa*", "**/id_ed25519*", "**/*secret*", "**/*.lock", "**/*-lock.json", "**/*-lock.yaml"]
@@ -23,10 +24,17 @@ const CLAUDE_ARGS = [
   "Write the commit message for the changes on stdin.",
 ];
 
-function exec(command, args, { cwd, input, env = GIT_ENV, timeout = 30 * 1000 } = {}) {
+function errorLine(stderr) {
+  if (stderr.includes("[rejected]")) return "rejected, the remote has new commits: pull first";
+  const lines = stderr.trim().split("\n");
+  const reason = lines.find((line) => /^(fatal|error): /.test(line)) ?? lines.at(-1);
+  return clean(reason.replace(/^(fatal|error): /, ""));
+}
+
+function exec(command, args, { cwd, input, env = GIT_ENV, timeout = 30 * 1000, detached = false } = {}) {
   return new Promise((resolve, reject) => {
-    const child = execFile(command, args, { cwd, env, timeout, maxBuffer: 64 * 1024 * 1024 }, (error, stdout, stderr) => {
-      if (error) return reject(new Error(clean((stderr || error.message).trim().split("\n").at(-1))));
+    const child = execFile(command, args, { cwd, env, timeout, detached, maxBuffer: 64 * 1024 * 1024 }, (error, stdout, stderr) => {
+      if (error) return reject(new Error(errorLine(stderr || error.message)));
       resolve(stdout);
     });
     child.stdin?.on("error", () => {});
@@ -35,6 +43,11 @@ function exec(command, args, { cwd, input, env = GIT_ENV, timeout = 30 * 1000 } 
 }
 
 const git = (cwd, args, options) => exec("git", ["-c", "core.fsmonitor=false", "-C", cwd, ...args], options);
+
+function githubRemote(remotes) {
+  const names = remotes.split("\n").filter((line) => /github\.com[:/]/.test(line)).map((line) => line.split("\t")[0]);
+  return names.includes("origin") ? "origin" : names[0] ?? null;
+}
 
 function parseStatus(raw) {
   const parts = raw.split("\0");
@@ -79,11 +92,20 @@ export function createGitSource({ selfMarker, onChange }) {
 
   async function repoAt(cwd) {
     const top = (await git(cwd, ["rev-parse", "--show-toplevel"])).trim();
-    const remotes = await git(top, ["remote", "-v"]);
-    if (!/github\.com[:/]/.test(remotes)) return null;
-    const branch = (await git(top, ["branch", "--show-current"])).trim()
-      || (await git(top, ["rev-parse", "--short", "HEAD"]).catch(() => "detached")).trim();
-    return { top, name: clean(path.basename(top)), branch: clean(branch) };
+    const remote = githubRemote(await git(top, ["remote", "-v"]));
+    if (!remote) return null;
+    const current = (await git(top, ["branch", "--show-current"])).trim();
+    const branch = current || (await git(top, ["rev-parse", "--short", "HEAD"]).catch(() => "detached")).trim();
+    const ahead = current ? await git(top, ["rev-list", "--count", "@{upstream}..HEAD"]).catch(() => null) : null;
+    return {
+      top,
+      name: clean(path.basename(top)),
+      branch: clean(branch),
+      current,
+      remote,
+      upstream: ahead !== null,
+      ahead: ahead === null ? 0 : Number(ahead.trim()) || 0,
+    };
   }
 
   async function refresh() {
@@ -135,6 +157,11 @@ export function createGitSource({ selfMarker, onChange }) {
     async commit(target, message) {
       await git(target.top, ["commit", "-m", message], { timeout: COMMIT_TIMEOUT_MS });
       return (await git(target.top, ["rev-parse", "--short", "HEAD"])).trim();
+    },
+
+    push(target) {
+      const args = target.upstream ? ["push"] : ["push", "--set-upstream", target.remote, target.current];
+      return git(target.top, args, { timeout: PUSH_TIMEOUT_MS, detached: true });
     },
   };
 }

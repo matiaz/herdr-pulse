@@ -19,7 +19,8 @@ const KINDS = {
   copied: THEME.blue,
   conflict: THEME.red,
 };
-const ACTIVITY = { stage: "staging", message: "generating message", commit: "committing" };
+const ACTIVITY = { stage: "staging", message: "generating message", commit: "committing", push: "pushing" };
+const BUTTONS = [["stage", "stage all", "stage"], ["message", "message"], ["commit", "commit"], ["push", "push"]];
 
 export function createGitSection({ selfMarker, onChange }) {
   const source = createGitSource({ selfMarker, onChange });
@@ -40,6 +41,10 @@ export function createGitSection({ selfMarker, onChange }) {
     stage: () => files().some(isUnstaged),
     message: () => files().length > 0,
     commit: () => files().some(isStaged),
+    push: () => {
+      const repo = source.repo();
+      return Boolean(repo?.current) && (!repo.upstream || repo.ahead > 0);
+    },
   };
 
   function notify(text, hex) {
@@ -86,6 +91,11 @@ export function createGitSection({ selfMarker, onChange }) {
         message = null;
         notify(`committed ${sha}`, THEME.green);
       }),
+    push: () =>
+      run("push", async (repo) => {
+        await source.push(repo);
+        notify(`pushed ${repo.branch} to ${repo.remote}`, THEME.green);
+      }),
   };
 
   function chip(id, label) {
@@ -96,17 +106,26 @@ export function createGitSection({ selfMarker, onChange }) {
     return `${background(fill)}${color(ink)} ${label} ${RESET}`;
   }
 
+  function buttonLayout(inner) {
+    const widthOf = (labels, gap) => labels.reduce((sum, [, label]) => sum + label.length + 2, 0) + gap * (labels.length - 1);
+    const full = BUTTONS.map(([id, label]) => [id, label]);
+    const short = BUTTONS.map(([id, label, compact]) => [id, compact ?? label]);
+    for (const [labels, gap] of [[full, BUTTON_GAP], [full, 1], [short, 1]]) {
+      if (widthOf(labels, gap) <= inner) return { labels, gap, total: widthOf(labels, gap) };
+    }
+    return { labels: short, gap: 1, total: widthOf(short, 1) };
+  }
+
   function actionLines(inner) {
-    const labels = [["stage", "stage all"], ["message", "message"], ["commit", "commit"]];
-    const total = labels.reduce((sum, [, label]) => sum + label.length + 2, 0) + BUTTON_GAP * (labels.length - 1);
+    const { labels, gap, total } = buttonLayout(inner);
     const indent = MARGIN + Math.max(0, Math.floor((inner - total) / 2));
     buttons = [];
     let x = indent + 1;
     for (const [id, label] of labels) {
       buttons.push({ id, from: x, to: x + label.length + 1 });
-      x += label.length + 2 + BUTTON_GAP;
+      x += label.length + 2 + gap;
     }
-    const lines = ["", `${" ".repeat(indent)}${labels.map(([id, label]) => chip(id, label)).join(" ".repeat(BUTTON_GAP))}`];
+    const lines = ["", `${" ".repeat(indent)}${labels.map(([id, label]) => chip(id, label)).join(" ".repeat(gap))}`];
     if (busy) lines.push(`${PAD}${color(THEME.blue)}${SPINNER[frame % SPINNER.length]} ${color(THEME.muted)}${ACTIVITY[busy]}…${RESET}`);
     else if (notice) lines.push(`${PAD}${color(notice.hex)}${wrap(notice.text, inner, 1)[0]}${RESET}`);
     if (message) for (const line of wrap(message, inner, PREVIEW_LINES)) lines.push(`${PAD}${color(THEME.text)}${line}${RESET}`);
@@ -157,7 +176,7 @@ export function createGitSection({ selfMarker, onChange }) {
     flex: true,
     visible: () => Boolean(source.repo()),
     title: () => `git · ${source.repo()?.name} · ${source.repo()?.branch}`,
-    status: () => null,
+    status: () => (source.repo()?.ahead ? `↑${source.repo().ahead}` : null),
     desiredRows: (columns) => body(columns, Infinity).length,
     render: body,
 

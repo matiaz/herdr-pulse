@@ -4,7 +4,7 @@ A side dock for [Herdr](https://herdr.dev) that keeps three things in view while
 
 - **Activity heatmap.** Your GitHub contributions or your Claude Code usage, drawn as a contribution calendar.
 - **Pull requests.** Every open PR you authored, are assigned to, or have been asked to review, with what it needs from you next.
-- **Git.** The changes in the folder you are working in, with buttons to stage everything, write a commit message with Claude, and commit.
+- **Git.** The changes in the folder you are working in, with buttons to stage everything, write a commit message with Claude, commit, and push.
 
 Each panel sits in its own box. You can reorder the boxes, and Pulse remembers the order and the dock width.
 
@@ -137,15 +137,20 @@ Each file shows what happened to it:
 
 The mark before it says whether it is staged: `●` staged, `◐` partly staged, `○` not staged.
 
-The three buttons sit at the bottom of the box:
+The four buttons sit at the bottom of the box:
 
 1. **stage all** stages every change, including new and deleted files (`git add -A`).
 2. **message** asks Claude to describe your changes in one or two sentences. Claude reads the staged changes, or every change if nothing is staged yet. The message appears under the buttons as `branch-name: message`, so you can read it before committing.
 3. **commit** commits the staged files with that message. If you did not generate one, it uses just the branch name as the message. The button stays disabled until something is staged.
+4. **push** pushes the branch to its GitHub remote. The first push of a new branch sets its upstream (`git push --set-upstream origin branch-name`); after that it is a plain `git push`. The button stays disabled until there is something to push, and the box title shows how many commits are waiting, such as `↑2`. Pulse never force-pushes: if the remote has commits you don't have, the push is rejected and Pulse tells you to pull first.
 
-After a commit, the message preview and the list clear and the box shows the new commit's short hash. Pulse never pushes.
+After a commit, the message preview and the list clear and the box shows the new commit's short hash.
 
-While stage, message or commit is running, a small hexagon animation shows what is happening and every button is disabled. A double tap cannot create two commits or two messages.
+While stage, message, commit or push is running, a small hexagon animation shows what is happening and every button is disabled. A double tap cannot create two commits or two pushes.
+
+Push uses the credentials your git already has, such as an SSH key in your agent or a credential helper. Pulse cannot answer a password or passphrase prompt, so if git needs one, the push fails with a message instead of waiting. Push once from a terminal to unlock it, then the button works.
+
+On a narrow dock, **stage all** is shortened to **stage** so all four buttons fit.
 
 ### Arranging the boxes
 
@@ -156,7 +161,7 @@ Click `↑` or `↓` in a box's title to move it, or drag a title onto another b
 Pulse keeps everything on your computer and has no server of its own.
 
 - **What it stores.** Caches and preferences go in Herdr's plugin state directory, `~/.local/state/herdr/plugins/matiaz.pulse/`. That is your contribution counts, your daily Claude Code cost totals, your last plan usage percentages, your open pull request list, the box order and the dock width. Only your user account can read it. Nothing is written to the plugin's own folder.
-- **What it sends to GitHub.** Read-only queries through your `gh` login, for your contribution calendar and your open pull requests.
+- **What it sends to GitHub.** Read-only queries through your `gh` login, for your contribution calendar and your open pull requests. When you press **push**, git pushes your branch the same way it does from a terminal.
 - **What it sends to Anthropic.** While the Claude Code view is showing, a read-only request for your plan usage every 2 minutes. It reads Claude Code's login token from the macOS keychain, or from `~/.claude/.credentials.json` on Linux, and only sends it to `api.anthropic.com`. Pulse never refreshes or stores the token: if it has expired, open Claude Code once and Pulse picks up the new one. Nothing else goes to Anthropic unless you press **message**. Then the staged diff (or the unstaged diff if nothing is staged), cut to 24 KB, and the list of changed file names go to Claude through your Claude Code login. Files that commonly hold secrets or noise are left out of the diff: `.env*`, `*.pem`, `*.key`, `*.p12`, SSH keys, anything with `secret` in its name, and lockfiles. Their names can still appear in the file list. The request runs without tools, hooks, MCP servers or session history.
 - **What it runs.** `gh`, `git`, `claude`, `herdr`, and your clipboard and browser openers. It runs them directly, never through a shell. Git runs with `core.fsmonitor` turned off, without external diff or textconv drivers and without taking the index lock, so watching a repository never runs that repository's configured programs or blocks your own git commands.
 - **What it shows.** Pull request titles, branch names and file names can come from other people, so Pulse strips terminal control characters from them before drawing.
