@@ -12,6 +12,9 @@ const DAY_LABELS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
 const WEEKDAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 const MONTH_STEP_WEEKS = 4;
+const TOGGLE_LABEL = "t switch";
+const LIMIT_LABEL_WIDTH = 8;
+const LIMIT_BAR = "━";
 
 function startOfToday() {
   const now = new Date();
@@ -40,6 +43,45 @@ function monthHeader(start, weeks) {
     lastEnd = at + 2;
   }
   return cells.join("").trimEnd();
+}
+
+function resetLabel(resetsAt) {
+  const at = new Date(Math.round(new Date(resetsAt) / 60000) * 60000);
+  const minutes = Math.round((at - Date.now()) / 60000);
+  if (!resetsAt || Number.isNaN(minutes) || minutes <= 0) return "not started";
+  if (minutes < 60) return `resets in ${minutes}m`;
+  if (minutes < 24 * 60) return `resets in ${Math.floor(minutes / 60)}h ${minutes % 60}m`;
+  return `resets ${WEEKDAYS[at.getDay()]} ${String(at.getHours()).padStart(2, "0")}:${String(at.getMinutes()).padStart(2, "0")}`;
+}
+
+function limitColor(percent) {
+  if (percent >= 90) return THEME.red;
+  if (percent >= 70) return THEME.yellow;
+  return THEME.blue;
+}
+
+function limitLine(label, window, columns) {
+  const expired = !window.resetsAt || new Date(window.resetsAt) <= Date.now();
+  const percent = expired ? 0 : Math.max(0, Math.min(100, Math.round(window.percent)));
+  const reset = resetLabel(window.resetsAt);
+  const percentText = `${percent}%`.padStart(4);
+  const barWidth = Math.max(4, columns - MARGIN * 2 - LIMIT_LABEL_WIDTH - percentText.length - reset.length - 4);
+  const filled = Math.round((percent / 100) * barWidth);
+  const bar = `${color(limitColor(percent))}${LIMIT_BAR.repeat(filled)}${color(THEME.empty)}${LIMIT_BAR.repeat(barWidth - filled)}`;
+  return `${PAD}${color(THEME.muted)}${label.padEnd(LIMIT_LABEL_WIDTH)}${bar} ${color(THEME.text)}${percentText}  ${color(THEME.muted)}${reset}${RESET}`;
+}
+
+function limitLines(limits, columns) {
+  const session = limits.session();
+  const weekly = limits.weekly();
+  if (!session && !weekly) {
+    const message = limits.error() ?? (limits.loading() ? "loading plan usage…" : null);
+    return message ? ["", `${PAD}${color(THEME.muted)}${message}${RESET}`] : [];
+  }
+  const lines = [""];
+  if (session) lines.push(limitLine("session", session, columns));
+  if (weekly) lines.push(limitLine("weekly", weekly, columns));
+  return lines;
 }
 
 export function createHeatmapSection({ view, save, onChange }) {
@@ -92,7 +134,6 @@ export function createHeatmapSection({ view, save, onChange }) {
     flex: false,
     title: () => source().title(),
     status: () => source().status(),
-    hint: () => `${view.offset ? `-${view.offset}w · ` : ""}←→ scroll  t switch`,
 
     render(width) {
       columns = width;
@@ -119,9 +160,10 @@ export function createHeatmapSection({ view, save, onChange }) {
       lines.push(`${PAD}${color(THEME.text)}${source().formatTotal(total)}${RESET}`);
       const legend = PALETTE.map((hex) => `${color(hex)}${CELL}`).join("");
       const legendWidth = MARGIN + 9 + PALETTE.length * PITCH;
-      const toggleColumn = Math.max(legendWidth + 2, columns - MARGIN - 1);
-      lines.push(`${PAD}${color(THEME.muted)}no usage ${legend}${" ".repeat(toggleColumn - legendWidth)}${color(THEME.muted)}⇄${RESET}`);
-      toggleHit = { row: lines.length - 1, x: toggleColumn + 1 };
+      const toggleColumn = Math.max(legendWidth + 2, columns - MARGIN - TOGGLE_LABEL.length);
+      lines.push(`${PAD}${color(THEME.muted)}no usage ${legend}${" ".repeat(toggleColumn - legendWidth)}${color(THEME.text)}t${color(THEME.muted)}${TOGGLE_LABEL.slice(1)}${RESET}`);
+      toggleHit = { row: lines.length - 1, from: toggleColumn + 1, to: toggleColumn + TOGGLE_LABEL.length };
+      if (source().limits) lines.push(...limitLines(source().limits, columns));
       return lines;
     },
 
@@ -130,7 +172,7 @@ export function createHeatmapSection({ view, save, onChange }) {
     },
 
     click(x, row) {
-      if (toggleHit && row === toggleHit.row && Math.abs(x - toggleHit.x) <= 1) switchSource();
+      if (toggleHit && row === toggleHit.row && x >= toggleHit.from && x <= toggleHit.to) switchSource();
     },
 
     wheel(direction) {

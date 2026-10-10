@@ -1,5 +1,5 @@
 import { readJson, writeJson } from "./lib/store.mjs";
-import { color, fit, PAD, RESET, THEME, width } from "./lib/term.mjs";
+import { color, fit, RESET, THEME, width } from "./lib/term.mjs";
 import { createGitSection } from "./sections/git.mjs";
 import { createHeatmapSection } from "./sections/heatmap.mjs";
 import { createPullsSection } from "./sections/pulls.mjs";
@@ -72,7 +72,7 @@ function render() {
   const ordered = visibleOrder().map((id) => byId[id]);
   const bodies = new Map();
   for (const section of ordered) if (!section.flex) bodies.set(section.id, section.render(columns));
-  const used = 1 + ordered.length * 2 + [...bodies.values()].reduce((n, lines) => n + lines.length, 0);
+  const used = ordered.length * 2 + [...bodies.values()].reduce((n, lines) => n + lines.length, 0);
   const flexible = ordered
     .filter((section) => section.flex)
     .map((section) => ({ section, want: section.desiredRows?.(columns) ?? Infinity }))
@@ -94,11 +94,7 @@ function render() {
     regions.push({ section, top, bottom: lines.length });
   });
 
-  const hovered = pointer && regionAt(pointer.y)?.section;
-  const hint = `${PAD}${color(THEME.muted)}${(hovered ?? ordered[0]).hint()}  q close${RESET}`;
-  const screen = lines.slice(0, rows - 1);
-  while (screen.length < rows - 1) screen.push("");
-  screen.push(hint);
+  const screen = lines.slice(0, rows);
   process.stdout.write(`\x1b[H${screen.map((line) => `${line}\x1b[K`).join("\r\n")}\x1b[J`);
 }
 

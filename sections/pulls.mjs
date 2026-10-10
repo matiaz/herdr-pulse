@@ -66,7 +66,6 @@ export function createPullsSection({ onChange }) {
     flex: true,
     title: () => `pull requests${source.items() ? ` · ${source.items().length}` : ""}`,
     status: () => flash ?? source.status(),
-    hint: () => "click copy  double click open",
     desiredRows: () => (source.items()?.length ? source.items().length * ROWS_PER_ITEM + 1 : 2),
 
     render(columns, maxRows) {

@@ -2,6 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { isoDay, quartileLevels, readJson, writeJson } from "../lib/store.mjs";
+import { createLimitsSource } from "./limits.mjs";
 
 const SCAN_FILE = "claude-scan.json";
 const HISTORY_FILE = "claude-history.json";
@@ -89,6 +90,7 @@ export function createClaudeSource() {
   const history = readJson(HISTORY_FILE, { days: {} });
   let levelOf = quartileLevels(Object.values(history.days));
   let scannedAt = 0;
+  const limits = createLimitsSource();
 
   function scan() {
     const previous = readJson(SCAN_FILE, {});
@@ -126,7 +128,9 @@ export function createClaudeSource() {
     level: (day) => levelOf(history.days[day] || 0),
     formatTotal: (total) => `$${total.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`,
     status: () => null,
+    limits,
     sync(start, end, onChange, { force = false } = {}) {
+      limits.sync(onChange, { force });
       if (!force && Date.now() - scannedAt < RESCAN_AFTER_MS) return;
       scannedAt = Date.now();
       try {

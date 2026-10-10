@@ -5,6 +5,7 @@ const POLL_MS = 2000;
 const SPIN_MS = 140;
 const NOTICE_MS = 4000;
 const PREVIEW_LINES = 3;
+const BUTTON_GAP = 2;
 const SPINNER = ["⬢⬡⬡", "⬡⬢⬡", "⬡⬡⬢", "⬡⬢⬡"];
 const CHIP = "#373e47";
 const CHIP_HOVER = "#444c56";
@@ -95,43 +96,36 @@ export function createGitSection({ selfMarker, onChange }) {
     return `${background(fill)}${color(ink)} ${label} ${RESET}`;
   }
 
-  function body(columns, maxRows) {
-    const repo = source.repo();
-    const inner = columns - MARGIN * 2;
-    if (messageFor && messageFor !== repo.top) message = messageFor = null;
-    const lines = [""];
-
+  function actionLines(inner) {
     const labels = [["stage", "stage all"], ["message", "message"], ["commit", "commit"]];
+    const total = labels.reduce((sum, [, label]) => sum + label.length + 2, 0) + BUTTON_GAP * (labels.length - 1);
+    const indent = MARGIN + Math.max(0, Math.floor((inner - total) / 2));
     buttons = [];
-    let x = MARGIN + 1;
+    let x = indent + 1;
     for (const [id, label] of labels) {
       buttons.push({ id, from: x, to: x + label.length + 1 });
-      x += label.length + 4;
+      x += label.length + 2 + BUTTON_GAP;
     }
-    buttonsRow = lines.length;
-    lines.push(`${PAD}${labels.map(([id, label]) => chip(id, label)).join("  ")}`);
-
+    const lines = ["", `${" ".repeat(indent)}${labels.map(([id, label]) => chip(id, label)).join(" ".repeat(BUTTON_GAP))}`];
     if (busy) lines.push(`${PAD}${color(THEME.blue)}${SPINNER[frame % SPINNER.length]} ${color(THEME.muted)}${ACTIVITY[busy]}…${RESET}`);
     else if (notice) lines.push(`${PAD}${color(notice.hex)}${wrap(notice.text, inner, 1)[0]}${RESET}`);
     if (message) for (const line of wrap(message, inner, PREVIEW_LINES)) lines.push(`${PAD}${color(THEME.text)}${line}${RESET}`);
+    return lines;
+  }
 
-    lines.push("");
+  function listLines(inner, room) {
     const list = files();
-    if (!list.length) {
-      lines.push(`${PAD}${color(THEME.muted)}working tree clean${RESET}`);
-      return lines;
-    }
+    if (!list.length) return [`${PAD}${color(THEME.muted)}working tree clean${RESET}`];
     const staged = list.filter(isStaged).length;
     const summary = `${list.length} changed · ${staged} staged`;
     const legend = "● staged  ○ unstaged";
     const gap = inner - summary.length - legend.length;
-    lines.push(`${PAD}${color(THEME.muted)}${summary}${gap >= 3 ? `${" ".repeat(gap)}${legend}` : ""}${RESET}`);
+    const lines = [`${PAD}${color(THEME.muted)}${summary}${gap >= 3 ? `${" ".repeat(gap)}${legend}` : ""}${RESET}`];
 
-    const room = maxRows - lines.length;
-    const fitsAll = list.length <= room;
-    const capacity = Math.max(1, fitsAll ? room : room - 1);
+    const fitsAll = list.length <= room - 1;
+    const capacity = Math.max(1, fitsAll ? room - 1 : room - 2);
     const offset = Math.min(Math.max(0, scroll), Math.max(0, list.length - capacity));
-    if (Number.isFinite(maxRows)) scroll = offset;
+    if (Number.isFinite(room)) scroll = offset;
     for (const file of list.slice(offset, offset + capacity)) {
       const kind = kindOf(file);
       const marker = isStaged(file) ? (isUnstaged(file) ? `${color(THEME.yellow)}◐` : `${color(THEME.green)}●`) : `${color(THEME.muted)}○`;
@@ -145,6 +139,17 @@ export function createGitSection({ selfMarker, onChange }) {
     return lines;
   }
 
+  function body(columns, maxRows) {
+    const repo = source.repo();
+    const inner = columns - MARGIN * 2;
+    if (messageFor && messageFor !== repo.top) message = messageFor = null;
+    const actionRows = actionLines(inner).length;
+    const top = ["", ...listLines(inner, maxRows - 1 - actionRows)];
+    const padding = Number.isFinite(maxRows) ? Math.max(0, maxRows - top.length - actionRows) : 0;
+    buttonsRow = top.length + padding + 1;
+    return [...top, ...Array(padding).fill(""), ...actionLines(inner)];
+  }
+
   setInterval(() => source.refresh(), POLL_MS);
 
   return {
@@ -153,7 +158,6 @@ export function createGitSection({ selfMarker, onChange }) {
     visible: () => Boolean(source.repo()),
     title: () => `git · ${source.repo()?.name} · ${source.repo()?.branch}`,
     status: () => null,
-    hint: () => "stage, message, then commit",
     desiredRows: (columns) => body(columns, Infinity).length,
     render: body,
 
