@@ -8,6 +8,12 @@ A side dock for [Herdr](https://herdr.dev) that keeps three things in view while
 
 Each panel sits in its own box. You can reorder the boxes, and Pulse remembers the order and the dock width.
 
+<p align="center">
+  <img src="docs/screenshots/heatmap-github.png" alt="Activity heatmap showing GitHub contributions" width="32%" valign="top">
+  <img src="docs/screenshots/heatmap-claude-code.png" alt="Activity heatmap showing Claude Code usage and plan limits" width="32%" valign="top">
+  <img src="docs/screenshots/git.png" alt="Git panel with changed files and action buttons" width="32%" valign="top">
+</p>
+
 ## No configuration needed
 
 Pulse uses the tools and accounts you are already logged into:
@@ -19,7 +25,7 @@ Pulse uses the tools and accounts you are already logged into:
 | Claude plan usage | Your existing Claude Code login. |
 | Pull requests | The same `gh` account as the heatmap. |
 | Git | The folder of the pane you are focused on in the same tab. Commits use the name and email your git is configured with for that repository. |
-| Commit messages | Your existing Claude Code login. |
+| Commit messages and pull request descriptions | Your existing Claude Code login. |
 
 There is nothing to set up inside Pulse: no tokens, usernames or paths.
 
@@ -31,7 +37,7 @@ There is nothing to set up inside Pulse: no tokens, usernames or paths.
 | Node.js 20 or newer | everything | Pulse has no npm dependencies and no build step. |
 | [GitHub CLI](https://cli.github.com) (`gh`) | heatmap, pull requests | Log in once with `gh auth login`. |
 | `git` | git panel | |
-| [Claude Code](https://claude.com/claude-code) (`claude`) | commit messages | Optional. Only the **message** button needs it. |
+| [Claude Code](https://claude.com/claude-code) (`claude`) | commit messages, pull request descriptions | Optional. Only the **message** and **create pr** buttons need it. |
 | `pbcopy` (macOS), or `wl-copy`, `xclip` or `xsel` (Linux) | copying PR links | |
 
 Pulse runs on macOS and Linux.
@@ -183,8 +189,8 @@ bin/run.sh          puts common install locations on PATH, then runs node
 app.mjs             the dock: layout, boxes, mouse and keyboard
 dock.mjs            opens, closes and sizes the dock pane through the herdr CLI
 sections/           one file per box: what it draws and how it reacts to input
-sources/            data for each box: GitHub, Claude Code transcripts, pull requests, git
-lib/                state files and terminal drawing helpers
+sources/            data for each box: GitHub, Claude Code transcripts and plan usage, pull requests, git
+lib/                state files, terminal drawing helpers, opening links in the browser
 ```
 
 To work on it locally:
