@@ -1,3 +1,4 @@
+import { openUrl } from "../lib/open.mjs";
 import { background, color, fitStart, MARGIN, PAD, RESET, THEME, wrap } from "../lib/term.mjs";
 import { createGitSource, isStaged, isUnstaged, kindOf } from "../sources/git.mjs";
 
@@ -19,8 +20,22 @@ const KINDS = {
   copied: THEME.blue,
   conflict: THEME.red,
 };
-const ACTIVITY = { stage: "staging", message: "generating message", commit: "committing", push: "pushing" };
-const BUTTONS = [["stage", "stage all", "stage"], ["message", "message"], ["commit", "commit"], ["push", "push"]];
+const ACTIVITY = {
+  stage: "staging",
+  message: "generating message",
+  commit: "committing",
+  pull: "pulling",
+  push: "pushing",
+  pr: "writing pull request",
+};
+const LOCAL_BUTTONS = [["stage", "stage all"], ["message", "message"], ["commit", "commit"]];
+const CHECKS = {
+  SUCCESS: ["✓ checks passed", THEME.green],
+  FAILURE: ["✗ checks failed", THEME.red],
+  ERROR: ["✗ checks failed", THEME.red],
+  PENDING: ["● checks running", THEME.yellow],
+  EXPECTED: ["● checks running", THEME.yellow],
+};
 
 export function createGitSection({ selfMarker, onChange }) {
   const source = createGitSource({ selfMarker, onChange });
@@ -34,16 +49,23 @@ export function createGitSection({ selfMarker, onChange }) {
   let scroll = 0;
   let pointer = null;
   let buttons = [];
-  let buttonsRow = -1;
+  let remoteRow = -1;
 
   const files = () => source.files();
   const enabled = {
     stage: () => files().some(isUnstaged),
     message: () => files().length > 0,
     commit: () => files().some(isStaged),
+    pull: () => source.repo()?.behind > 0,
     push: () => {
       const repo = source.repo();
       return Boolean(repo?.current) && (!repo.upstream || repo.ahead > 0);
+    },
+    pr: () => {
+      const repo = source.repo();
+      const info = source.remote();
+      if (!repo?.current || !info?.defaultBranch || repo.current === info.defaultBranch) return false;
+      return Boolean(info.pr) || (repo.upstream && repo.ahead === 0);
     },
   };
 
@@ -91,41 +113,86 @@ export function createGitSection({ selfMarker, onChange }) {
         message = null;
         notify(`committed ${sha}`, THEME.green);
       }),
+    pull: () =>
+      run("pull", async (repo) => {
+        const count = repo.behind;
+        await source.pull(repo);
+        notify(`pulled ${count} commit${count === 1 ? "" : "s"}`, THEME.green);
+      }),
     push: () =>
       run("push", async (repo) => {
         await source.push(repo);
         notify(`pushed ${repo.branch} to ${repo.remote}`, THEME.green);
       }),
+    pr: () => {
+      const existing = source.remote()?.pr;
+      if (existing) {
+        if (busy) return;
+        openUrl(existing.url);
+        notify(`opened PR #${existing.number}`, THEME.green);
+        return onChange();
+      }
+      return run("pr", async (repo) => {
+        const { number } = await source.createPullRequest(repo, source.remote().defaultBranch);
+        notify(number ? `created PR #${number}` : "created pull request", THEME.green);
+      });
+    },
   };
+
+  function remoteButtons() {
+    const pr = source.remote()?.pr;
+    return [["pull", "pull"], ["push", "push"], ["pr", pr ? `pr #${pr.number}` : "create pr"]];
+  }
+
+  function remoteLine() {
+    const repo = source.repo();
+    const info = source.remote();
+    if (!repo || !info) return null;
+    const parts = [];
+    if (info.pr) parts.push(`${color(THEME.text)}${info.pr.draft ? "draft " : ""}PR #${info.pr.number}`);
+    else if (repo.current && info.defaultBranch && repo.current !== info.defaultBranch) parts.push(`${color(THEME.muted)}no PR yet`);
+    const check = CHECKS[info.checks];
+    if (check) parts.push(`${color(check[1])}${check[0]}`);
+    return parts.length ? `${PAD}${parts.join(`${color(THEME.muted)} · `)}${RESET}` : null;
+  }
+
+  function remoteTarget() {
+    const repo = source.repo();
+    const info = source.remote();
+    if (info?.pr) return info.pr.url;
+    if (info?.checks && repo?.slug) return `https://github.com/${repo.slug}/commit/${repo.head}`;
+    return null;
+  }
 
   function chip(id, label) {
     const active = enabled[id]() && !busy;
-    const hovered = active && pointer?.row === buttonsRow && buttons.find((b) => b.id === id && pointer.x >= b.from && pointer.x <= b.to);
+    const hovered = active && buttons.find((b) => b.id === id && pointer?.row === b.row && pointer.x >= b.from && pointer.x <= b.to);
     const fill = busy === id ? THEME.blue : !active ? CHIP_OFF : hovered ? CHIP_HOVER : CHIP;
     const ink = busy === id ? "#0d1117" : active ? THEME.text : THEME.muted;
     return `${background(fill)}${color(ink)} ${label} ${RESET}`;
   }
 
-  function buttonLayout(inner) {
-    const widthOf = (labels, gap) => labels.reduce((sum, [, label]) => sum + label.length + 2, 0) + gap * (labels.length - 1);
-    const full = BUTTONS.map(([id, label]) => [id, label]);
-    const short = BUTTONS.map(([id, label, compact]) => [id, compact ?? label]);
-    for (const [labels, gap] of [[full, BUTTON_GAP], [full, 1], [short, 1]]) {
-      if (widthOf(labels, gap) <= inner) return { labels, gap, total: widthOf(labels, gap) };
-    }
-    return { labels: short, gap: 1, total: widthOf(short, 1) };
-  }
-
-  function actionLines(inner) {
-    const { labels, gap, total } = buttonLayout(inner);
-    const indent = MARGIN + Math.max(0, Math.floor((inner - total) / 2));
-    buttons = [];
+  function buttonRow(labels, inner, row, placed) {
+    const widthOf = (gap) => labels.reduce((sum, [, label]) => sum + label.length + 2, 0) + gap * (labels.length - 1);
+    const gap = widthOf(BUTTON_GAP) <= inner ? BUTTON_GAP : 1;
+    const indent = MARGIN + Math.max(0, Math.floor((inner - widthOf(gap)) / 2));
     let x = indent + 1;
     for (const [id, label] of labels) {
-      buttons.push({ id, from: x, to: x + label.length + 1 });
+      placed.push({ id, row, from: x, to: x + label.length + 1 });
       x += label.length + 2 + gap;
     }
-    const lines = ["", `${" ".repeat(indent)}${labels.map(([id, label]) => chip(id, label)).join(" ".repeat(gap))}`];
+    return `${" ".repeat(indent)}${labels.map(([id, label]) => chip(id, label)).join(" ".repeat(gap))}`;
+  }
+
+  function actionLines(inner, offset = 0) {
+    const lines = [""];
+    const status = remoteLine();
+    remoteRow = status ? offset + lines.length : -1;
+    if (status) lines.push(status);
+    const placed = [];
+    lines.push(buttonRow(LOCAL_BUTTONS, inner, offset + lines.length, placed));
+    lines.push(buttonRow(remoteButtons(), inner, offset + lines.length, placed));
+    buttons = placed;
     if (busy) lines.push(`${PAD}${color(THEME.blue)}${SPINNER[frame % SPINNER.length]} ${color(THEME.muted)}${ACTIVITY[busy]}…${RESET}`);
     else if (notice) lines.push(`${PAD}${color(notice.hex)}${wrap(notice.text, inner, 1)[0]}${RESET}`);
     if (message) for (const line of wrap(message, inner, PREVIEW_LINES)) lines.push(`${PAD}${color(THEME.text)}${line}${RESET}`);
@@ -165,8 +232,7 @@ export function createGitSection({ selfMarker, onChange }) {
     const actionRows = actionLines(inner).length;
     const top = ["", ...listLines(inner, maxRows - 1 - actionRows)];
     const padding = Number.isFinite(maxRows) ? Math.max(0, maxRows - top.length - actionRows) : 0;
-    buttonsRow = top.length + padding + 1;
-    return [...top, ...Array(padding).fill(""), ...actionLines(inner)];
+    return [...top, ...Array(padding).fill(""), ...actionLines(inner, top.length + padding)];
   }
 
   setInterval(() => source.refresh(), POLL_MS);
@@ -176,7 +242,11 @@ export function createGitSection({ selfMarker, onChange }) {
     flex: true,
     visible: () => Boolean(source.repo()),
     title: () => `git · ${source.repo()?.name} · ${source.repo()?.branch}`,
-    status: () => (source.repo()?.ahead ? `↑${source.repo().ahead}` : null),
+    status: () => {
+      const repo = source.repo();
+      const counts = [repo?.ahead ? `↑${repo.ahead}` : "", repo?.behind ? `↓${repo.behind}` : ""].filter(Boolean);
+      return counts.length ? counts.join(" ") : null;
+    },
     desiredRows: (columns) => body(columns, Infinity).length,
     render: body,
 
@@ -185,8 +255,12 @@ export function createGitSection({ selfMarker, onChange }) {
     },
 
     click(x, row) {
-      if (row !== buttonsRow) return;
-      const hit = buttons.find((button) => x >= button.from && x <= button.to);
+      if (row === remoteRow) {
+        const url = remoteTarget();
+        if (url) openUrl(url);
+        return;
+      }
+      const hit = buttons.find((button) => button.row === row && x >= button.from && x <= button.to);
       if (hit) actions[hit.id]();
     },
 

@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { openUrl } from "../lib/open.mjs";
 import { BOLD, color, fit, MARGIN, PAD, RESET, THEME } from "../lib/term.mjs";
 import { createPullsSource } from "../sources/pulls.mjs";
 
@@ -34,12 +35,6 @@ function pipeTo(command, args, input) {
 async function copy(text) {
   for (const [command, args] of CLIPBOARDS) if (await pipeTo(command, args, text)) return true;
   return false;
-}
-
-function open(url) {
-  const child = spawn(process.platform === "darwin" ? "open" : "xdg-open", [url], { stdio: "ignore", detached: true });
-  child.on("error", () => {});
-  child.unref();
 }
 
 export function createPullsSection({ onChange }) {
@@ -109,11 +104,11 @@ export function createPullsSection({ onChange }) {
       const now = Date.now();
       if (lastClick?.url === item.url && now - lastClick.at < DOUBLE_CLICK_MS) {
         lastClick = null;
-        open(item.url);
+        openUrl(item.url);
         notify(`opened ${item.id}`);
       } else {
         lastClick = { url: item.url, at: now };
-        copy(item.url).then((copied) => notify(copied ? `copied ${item.id}` : "copy failed: no clipboard tool"));
+        copy(item.url).then((copied) => notify(copied ? "copied url" : "copy failed: no clipboard tool"));
       }
     },
 
