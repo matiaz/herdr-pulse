@@ -1,4 +1,6 @@
 import { execFile } from "node:child_process";
+import { existsSync } from "node:fs";
+import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { clean } from "../lib/term.mjs";
@@ -13,6 +15,15 @@ const FETCH_TIMEOUT_MS = 60 * 1000;
 const FETCH_EVERY_MS = 2 * 60 * 1000;
 const REMOTE_EVERY_MS = 60 * 1000;
 const PR_TITLE_MAX = 72;
+const DISCOVER_EVERY_MS = 30 * 1000;
+const SUMMARY_EVERY_MS = 6 * 1000;
+const HOLD_MS = 5 * 1000;
+const MAX_REPOS = 12;
+const MAX_CANDIDATES = 48;
+const MAX_DEPTH = 3;
+const MAX_DIRS = 400;
+const MAX_STATS = 300;
+const SKIP_DIRS = new Set(["node_modules", "vendor", "Pods", "DerivedData", "build", "dist"]);
 const SYSTEM_PROMPT = "You write git commit messages. Reply with one or two short sentences describing the change, in plain text. No quotes, no prefix, no markdown, no trailing explanation.";
 const PR_SYSTEM_PROMPT = [
   "You write GitHub pull request titles and descriptions.",
@@ -87,6 +98,26 @@ function parseStatus(raw) {
   return files;
 }
 
+function parseSummary(raw) {
+  const summary = { oid: "", branch: "", upstream: false, ahead: 0, behind: 0, paths: [] };
+  const parts = raw.split("\0");
+  for (let i = 0; i < parts.length; i++) {
+    const entry = parts[i];
+    const fields = entry.split(" ");
+    if (entry.startsWith("# branch.oid ")) summary.oid = fields[2];
+    else if (entry.startsWith("# branch.head ")) summary.branch = fields.slice(2).join(" ");
+    else if (entry.startsWith("# branch.upstream ")) summary.upstream = true;
+    else if (entry.startsWith("# branch.ab ")) [summary.ahead, summary.behind] = fields.slice(2, 4).map((n) => Math.abs(Number(n)) || 0);
+    else if (entry.startsWith("1 ")) summary.paths.push(fields.slice(8).join(" "));
+    else if (entry.startsWith("2 ")) {
+      summary.paths.push(fields.slice(9).join(" "));
+      i++;
+    } else if (entry.startsWith("u ")) summary.paths.push(fields.slice(10).join(" "));
+    else if (entry.startsWith("? ")) summary.paths.push(entry.slice(2));
+  }
+  return summary;
+}
+
 function claude(args, input) {
   return exec("claude", args, { cwd: os.tmpdir(), input, env: process.env, timeout: CLAUDE_TIMEOUT_MS });
 }
@@ -111,6 +142,9 @@ export function createGitSource({ selfMarker, onChange }) {
   const fetchedAt = new Map();
   let remote = { key: null, info: null, at: 0 };
   let remotePending = false;
+  let workspace = null;
+  let heldUntil = 0;
+  let again = false;
 
   async function findTarget() {
     const panes = JSON.parse(await exec(HERDR, ["pane", "list"])).result.panes;
@@ -123,8 +157,75 @@ export function createGitSource({ selfMarker, onChange }) {
     return target;
   }
 
-  async function repoAt(cwd) {
-    const top = (await git(cwd, ["rev-parse", "--show-toplevel"])).trim();
+  const topLevel = async (cwd) => (await git(cwd, ["rev-parse", "--show-toplevel"])).trim();
+
+  async function discover(root) {
+    const candidates = [];
+    let level = [root];
+    let visited = 0;
+    for (let depth = 1; depth <= MAX_DEPTH && level.length && visited < MAX_DIRS; depth++) {
+      const next = [];
+      for (const dir of level) {
+        if (visited++ >= MAX_DIRS) break;
+        for (const entry of await fs.readdir(dir, { withFileTypes: true }).catch(() => [])) {
+          if (!entry.isDirectory() || entry.name.startsWith(".") || SKIP_DIRS.has(entry.name)) continue;
+          const child = path.join(dir, entry.name);
+          (existsSync(path.join(child, ".git")) ? candidates : next).push(child);
+        }
+      }
+      level = next;
+    }
+    const sorted = candidates.sort((a, b) => a.localeCompare(b)).slice(0, MAX_CANDIDATES);
+    const found = await Promise.all(sorted.map(async (dir) => {
+      const top = await topLevel(dir).catch(() => null);
+      if (!top || !githubRemote(await git(top, ["remote", "-v"]).catch(() => ""))) return null;
+      return { top, name: clean(path.relative(root, dir)) };
+    }));
+    return found.filter(Boolean).slice(0, MAX_REPOS);
+  }
+
+  async function summarize(child) {
+    const raw = await git(child.top, ["status", "--porcelain=v2", "--branch", "-z", "--untracked-files=all"]);
+    const { oid, branch, paths, ...counts } = parseSummary(raw);
+    const times = await Promise.all(paths.slice(0, MAX_STATS).map((file) => fs.stat(path.join(child.top, file)).then((stat) => stat.mtimeMs, () => 0)));
+    const name = branch === "(detached)" ? oid.slice(0, 7) : branch;
+    return { ...child, ...counts, branch: clean(name), changed: paths.length, activity: Math.max(0, ...times) };
+  }
+
+  function choose() {
+    if (workspace.shown && !workspace.repos.some((r) => r.top === workspace.shown)) workspace.shown = null;
+    if (Date.now() < heldUntil) return;
+    const newest = workspace.repos.filter((r) => r.changed).reduce((best, r) => (!best || r.activity > best.activity ? r : best), null);
+    if (newest && newest.top !== workspace.shown && newest.activity > workspace.chosenAt) {
+      workspace.shown = newest.top;
+      workspace.chosenAt = newest.activity;
+    }
+  }
+
+  async function refreshWorkspace(root) {
+    if (workspace?.root !== root) workspace = { root, children: [], repos: [], scannedAt: 0, summarizedAt: 0, shown: null, chosenAt: 0 };
+    const now = Date.now();
+    if (now - workspace.scannedAt >= DISCOVER_EVERY_MS) {
+      workspace.children = await discover(root).catch(() => []);
+      workspace.scannedAt = now;
+      workspace.summarizedAt = 0;
+    }
+    if (now - workspace.summarizedAt >= SUMMARY_EVERY_MS) {
+      const empty = { branch: "", upstream: false, ahead: 0, behind: 0, changed: 0, activity: 0 };
+      workspace.repos = await Promise.all(workspace.children.map((child) => summarize(child).catch(() => ({ ...child, ...empty }))));
+      workspace.summarizedAt = now;
+    }
+    choose();
+  }
+
+  function pick(top) {
+    if (!workspace) return;
+    workspace.shown = top;
+    workspace.chosenAt = Date.now();
+    refresh();
+  }
+
+  async function repoAt(top) {
     const github = githubRemote(await git(top, ["remote", "-v"]));
     if (!github) return null;
     const current = (await git(top, ["branch", "--show-current"])).trim();
@@ -191,11 +292,18 @@ export function createGitSource({ selfMarker, onChange }) {
   }
 
   async function refresh() {
-    if (refreshing) return;
+    if (refreshing) {
+      again = true;
+      return;
+    }
     refreshing = true;
     try {
       const cwd = await findTarget().catch(() => target);
-      repo = cwd ? await repoAt(cwd).catch(() => null) : null;
+      const top = cwd ? await topLevel(cwd).catch(() => null) : null;
+      if (top || !cwd) workspace = null;
+      else await refreshWorkspace(cwd);
+      const shown = top ?? workspace?.shown;
+      repo = shown ? await repoAt(shown).catch(() => null) : null;
       files = repo
         ? parseStatus(await git(repo.top, ["status", "--porcelain=v1", "-z", "--untracked-files=all"]))
         : [];
@@ -203,13 +311,17 @@ export function createGitSource({ selfMarker, onChange }) {
       files = [];
     } finally {
       refreshing = false;
-      const next = JSON.stringify([repo, files]);
+      const next = JSON.stringify([repo, files, workspace && [workspace.shown, workspace.repos]]);
       if (next !== signature) {
         signature = next;
         onChange();
       }
       fetchUpstream();
       updateRemote();
+      if (again) {
+        again = false;
+        refresh();
+      }
     }
   }
 
@@ -255,7 +367,12 @@ export function createGitSource({ selfMarker, onChange }) {
     repo: () => repo,
     files: () => files,
     remote: () => (repo && remote.key === remoteKey(repo) ? remote.info : null),
+    workspace: () => (workspace?.repos.length ? { name: clean(path.basename(workspace.root)), repos: workspace.repos } : null),
     refresh,
+
+    select: pick,
+    showAll: () => pick(null),
+    hold: () => (heldUntil = Date.now() + HOLD_MS),
 
     sync: refresh,
 

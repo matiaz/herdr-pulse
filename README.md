@@ -50,7 +50,13 @@ herdr plugin install matiaz/herdr-pulse
 
 Herdr shows the manifest before installing. Pulse runs no build commands.
 
-To update, run the same command again. Herdr replaces its copy of the plugin.
+Herdr does not update plugins on its own. To get the latest version, run:
+
+```sh
+herdr plugin update matiaz.pulse
+```
+
+If your Herdr has no `plugin update` command, run the install command again instead. Either way, Herdr keeps your settings, and a dock that is already open keeps running the old version until you close it and open it again.
 
 ## Showing and hiding the dock
 
@@ -128,7 +134,9 @@ The list refreshes every 2 minutes. Press `r` to refresh now.
 
 ### Git
 
-This box follows the pane you are focused on in the same tab. When that pane's folder is inside a git repository with a GitHub remote, the box shows the repository name, the branch, and every changed file. Otherwise the box hides itself.
+This box follows the pane you are focused on in the same tab. When that pane's folder is inside a git repository with a GitHub remote, the box shows the repository name, the branch, and every changed file.
+
+When the folder is not a repository itself but holds repositories up to three levels down, such as a parent folder you opened to work across several projects, the box shows the repository where files changed most recently. It moves to another repository when files change there. Use **‹ ›** at the top of the box to switch by hand, or **all repos** to see a list of every repository with its branch and number of changed files; click one to open it. When none of them have changes, the box starts on that list. If the folder holds no repositories with a GitHub remote, the box hides itself.
 
 Each file shows what happened to it:
 
