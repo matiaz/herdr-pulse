@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
-import { openUrl } from "../lib/open.mjs";
 import { BOLD, color, fit, MARGIN, PAD, RESET, THEME } from "../lib/term.mjs";
 import { createPullsSource } from "../sources/pulls.mjs";
+import { startReview } from "../sources/review.mjs";
 
 const ROWS_PER_ITEM = 2;
 const DOUBLE_CLICK_MS = 400;
@@ -42,6 +42,7 @@ export function createPullsSection({ onChange }) {
   let scroll = 0;
   let hovered = null;
   let rowItems = [];
+  let reviewing = false;
   let lastClick = null;
   let flash = null;
   let flashTimer = null;
@@ -54,6 +55,20 @@ export function createPullsSection({ onChange }) {
       onChange();
     }, FLASH_MS);
     onChange();
+  }
+
+  async function review(item) {
+    if (reviewing) return;
+    reviewing = true;
+    notify(`starting review of ${item.id}`);
+    try {
+      await startReview(item);
+      notify(`reviewing ${item.id}`);
+    } catch (error) {
+      notify(`review failed: ${error.message}`);
+    } finally {
+      reviewing = false;
+    }
   }
 
   return {
@@ -104,8 +119,7 @@ export function createPullsSection({ onChange }) {
       const now = Date.now();
       if (lastClick?.url === item.url && now - lastClick.at < DOUBLE_CLICK_MS) {
         lastClick = null;
-        openUrl(item.url);
-        notify(`opened ${item.id}`);
+        review(item);
       } else {
         lastClick = { url: item.url, at: now };
         copy(item.url).then((copied) => notify(copied ? "copied url" : "copy failed: no clipboard tool"));

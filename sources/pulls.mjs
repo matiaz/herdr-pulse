@@ -66,6 +66,7 @@ function normalize(data) {
         url: pr.url,
         updatedAt: pr.updatedAt,
         reviewRequested,
+        mine: pr.author?.login === login,
         action: actionOf(pr, login, reviewRequested),
       });
     }

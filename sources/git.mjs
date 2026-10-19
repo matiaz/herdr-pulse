@@ -15,6 +15,9 @@ const FETCH_TIMEOUT_MS = 60 * 1000;
 const FETCH_EVERY_MS = 2 * 60 * 1000;
 const REMOTE_EVERY_MS = 60 * 1000;
 const PR_TITLE_MAX = 72;
+const PR_TEMPLATE_MAX_CHARS = 8000;
+const PR_TEMPLATE_DIRS = [".github/", "", "docs/"];
+const PR_TEMPLATE_NAME = /^pull_request_template\.(md|txt)$/i;
 const DISCOVER_EVERY_MS = 30 * 1000;
 const SUMMARY_EVERY_MS = 6 * 1000;
 const HOLD_MS = 5 * 1000;
@@ -25,12 +28,11 @@ const MAX_DIRS = 400;
 const MAX_STATS = 300;
 const SKIP_DIRS = new Set(["node_modules", "vendor", "Pods", "DerivedData", "build", "dist"]);
 const SYSTEM_PROMPT = "You write git commit messages. Reply with one or two short sentences describing the change, in plain text. No quotes, no prefix, no markdown, no trailing explanation.";
-const PR_SYSTEM_PROMPT = [
-  "You write GitHub pull request titles and descriptions.",
-  "Reply in exactly this shape: the title on the first line, one blank line, then the description.",
-  `The title is plain text, under ${PR_TITLE_MAX} characters, in the imperative mood, with no prefix, quotes or trailing period.`,
-  "The description is a brief summary of what changed and why: one short sentence, then two to five short markdown bullet points. No headings.",
-  "Never mention AI, Claude, or how the text was written. No sign-off, no trailing explanation.",
+const PR_DESCRIPTION = "The description is a brief summary of what changed and why: one short sentence, then two to five short markdown bullet points. No headings.";
+const PR_TEMPLATE_DESCRIPTION = [
+  "The description fills in the pull request template given on stdin: keep its headings, sections and checklists in the same order,",
+  "replace placeholder text and HTML comments with content from the branch, tick only checklist items the commits or diff clearly support,",
+  "and write N/A under a section that does not apply.",
 ].join(" ");
 const GIT_ENV = { ...process.env, GIT_OPTIONAL_LOCKS: "0", GIT_TERMINAL_PROMPT: "0" };
 const PRIVATE_PATHS = ["**/.env*", "**/*.pem", "**/*.key", "**/*.p12", "**/id_rsa*", "**/id_ed25519*", "**/*secret*", "**/*.lock", "**/*-lock.json", "**/*-lock.yaml"]
@@ -45,7 +47,17 @@ const CLAUDE_FLAGS = [
   "--disable-slash-commands",
 ];
 const COMMIT_ARGS = [...CLAUDE_FLAGS, "--system-prompt", SYSTEM_PROMPT, "Write the commit message for the changes on stdin."];
-const PR_ARGS = [...CLAUDE_FLAGS, "--system-prompt", PR_SYSTEM_PROMPT, "Write the pull request title and description for the branch on stdin."];
+
+function prArgs(templated) {
+  const systemPrompt = [
+    "You write GitHub pull request titles and descriptions.",
+    "Reply in exactly this shape: the title on the first line, one blank line, then the description.",
+    `The title is plain text, under ${PR_TITLE_MAX} characters, in the imperative mood, with no prefix, quotes or trailing period.`,
+    templated ? PR_TEMPLATE_DESCRIPTION : PR_DESCRIPTION,
+    "Never mention AI, Claude, or how the text was written. No sign-off, no trailing explanation.",
+  ].join(" ");
+  return [...CLAUDE_FLAGS, "--system-prompt", systemPrompt, "Write the pull request title and description for the branch on stdin."];
+}
 const REMOTE_QUERY = `query($owner: String!, $name: String!, $ref: String!, $oid: GitObjectID!) {
   repository(owner: $owner, name: $name) {
     defaultBranchRef { name }
@@ -335,6 +347,23 @@ export function createGitSource({ selfMarker, onChange }) {
     return `Files:\n${list}\n\nDiff:\n${diff.slice(0, MAX_DIFF_CHARS)}`;
   }
 
+  async function findTemplate(top, ref) {
+    const names = async (...args) => (await git(top, ["ls-tree", "--name-only", ...args]).catch(() => "")).split("\n").filter(Boolean);
+    const files = [...(await names(ref)), ...(await names("-r", ref, "--", ".github", "docs", "PULL_REQUEST_TEMPLATE", "pull_request_template"))];
+    const inside = (file, dir) => file.toLowerCase().startsWith(dir) && !file.slice(dir.length).includes("/");
+    for (const dir of PR_TEMPLATE_DIRS) {
+      const folder = `${dir}pull_request_template/`;
+      const choices = files.filter((file) => inside(file, folder) && /\.(md|txt)$/i.test(file)).sort();
+      const file = files.find((f) => inside(f, dir) && PR_TEMPLATE_NAME.test(f.slice(dir.length)))
+        ?? choices.find((f) => /^default\.(md|txt)$/i.test(path.basename(f)))
+        ?? choices[0];
+      if (!file) continue;
+      const text = (await git(top, ["cat-file", "blob", `${ref}:${file}`]).catch(() => "")).trim();
+      if (text) return text.slice(0, PR_TEMPLATE_MAX_CHARS);
+    }
+    return null;
+  }
+
   async function describeBranch(target, base) {
     const upstreamRemote = (await git(target.top, ["config", "--get", `branch.${target.current}.remote`]).catch(() => "")).trim();
     const candidates = [...new Set([upstreamRemote, target.remote].filter(Boolean))].map((name) => `${name}/${base}`);
@@ -350,7 +379,10 @@ export function createGitSource({ selfMarker, onChange }) {
     const stat = await git(target.top, ["diff", "--no-ext-diff", "--no-textconv", "--no-color", "--stat", `${baseRef}...HEAD`, "--", ".", ...PRIVATE_PATHS]);
     const diff = await git(target.top, ["diff", "--no-ext-diff", "--no-textconv", "--no-color", `${baseRef}...HEAD`, "--", ".", ...PRIVATE_PATHS]);
     if (!log.trim()) throw new Error(`no commits ahead of ${base}`);
-    return `Branch: ${target.current}\nBase: ${base}\n\nCommits:\n${log.trim()}\n\nFiles:\n${stat.trim()}\n\nDiff:\n${diff.slice(0, MAX_DIFF_CHARS)}`;
+    const template = await findTemplate(target.top, `refs/remotes/${baseRef}`);
+    const templateText = template ? `Template:\n${template}\n\n` : "";
+    const input = `Branch: ${target.current}\nBase: ${base}\n\nCommits:\n${log.trim()}\n\nFiles:\n${stat.trim()}\n\n${templateText}Diff:\n${diff.slice(0, MAX_DIFF_CHARS)}`;
+    return { input, templated: Boolean(template) };
   }
 
   function parsePullRequest(output, branch) {
@@ -405,8 +437,8 @@ export function createGitSource({ selfMarker, onChange }) {
     },
 
     async createPullRequest(target, base) {
-      const input = await describeBranch(target, base);
-      const { title, body } = parsePullRequest(await claude(PR_ARGS, input), target.current);
+      const { input, templated } = await describeBranch(target, base);
+      const { title, body } = parsePullRequest(await claude(prArgs(templated), input), target.current);
       const args = ["pr", "create", "--repo", target.slug, "--head", target.current, "--base", base, "--title", title, "--body", body];
       const output = await exec("gh", args, { cwd: target.top, env: process.env, timeout: PUSH_TIMEOUT_MS, detached: true });
       const url = output.trim().split("\n").find((line) => /^https:\/\/github\.com\/.+\/pull\/\d+/.test(line.trim()))?.trim();
