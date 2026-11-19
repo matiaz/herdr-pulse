@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { ghEnv } from "../lib/git-safety.mjs";
 import { addDays, eachDay, isoDay, readJson, writeJson } from "../lib/store.mjs";
 import { clean } from "../lib/term.mjs";
 
@@ -18,7 +19,7 @@ const QUERY = `query($from: DateTime!, $to: DateTime!) {
 function gh(from, to) {
   const args = ["api", "graphql", "-f", `query=${QUERY}`, "-f", `from=${isoDay(from)}T00:00:00`, "-f", `to=${isoDay(to)}T23:59:59`];
   return new Promise((resolve, reject) => {
-    execFile("gh", args, { maxBuffer: 16 * 1024 * 1024 }, (error, stdout, stderr) => {
+    execFile("gh", args, { maxBuffer: 16 * 1024 * 1024, env: ghEnv(process.env) }, (error, stdout, stderr) => {
       if (error) return reject(new Error(clean((stderr || error.message).trim())));
       try {
         const viewer = JSON.parse(stdout).data?.viewer;

@@ -17,5 +17,11 @@ title = "Pulse: toggle dock"
 contexts = ["workspace", "tab", "pane"]
 command = ["sh", "bin/run.sh", "dock.mjs"]
 
+[[actions]]
+id = "refresh"
+title = "Pulse: refresh"
+contexts = ["workspace", "tab", "pane"]
+command = ["sh", "bin/run.sh", "refresh.mjs"]
+
 [[startup]]
 command = ["sh", "bin/run.sh", "dock.mjs", "open"]
