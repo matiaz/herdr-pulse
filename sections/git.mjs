@@ -1,4 +1,6 @@
+import { STATUS_OFF_HINT } from "../lib/git-safety.mjs";
 import { openUrl } from "../lib/open.mjs";
+import { setting } from "../lib/settings.mjs";
 import { background, color, fit, fitStart, MARGIN, PAD, RESET, THEME, width, wrap } from "../lib/term.mjs";
 import { createGitSource, isStaged, isUnstaged, kindOf } from "../sources/git.mjs";
 
@@ -29,6 +31,8 @@ const ACTIVITY = {
   pr: "writing pull request",
 };
 const LOCAL_BUTTONS = [["stage", "stage all", "stage"], ["message", "message", "msg"], ["commit", "commit"]];
+const HINT_LINES = 3;
+const aiMessages = () => setting("git.aiMessages") === true;
 const CHECKS = {
   SUCCESS: ["✓ checks passed", THEME.green],
   FAILURE: ["✗ checks failed", THEME.red],
@@ -54,10 +58,11 @@ export function createGitSection({ selfMarker, onChange }) {
   let rows = [];
 
   const files = () => source.files();
+  const paused = () => Boolean(source.repo()?.paused);
   const enabled = {
-    stage: () => files().some(isUnstaged),
-    message: () => files().length > 0,
-    commit: () => files().some(isStaged),
+    stage: () => paused() || files().some(isUnstaged),
+    message: () => aiMessages() && (paused() || files().length > 0),
+    commit: () => paused() || files().some(isStaged),
     pull: () => source.repo()?.behind > 0,
     push: () => {
       const repo = source.repo();
@@ -200,11 +205,13 @@ export function createGitSection({ selfMarker, onChange }) {
     remoteRow = status ? offset + lines.length : -1;
     if (status) lines.push(status);
     const placed = [];
-    lines.push(buttonRow(LOCAL_BUTTONS, inner, offset + lines.length, placed));
+    const local = aiMessages() ? LOCAL_BUTTONS : LOCAL_BUTTONS.filter(([id]) => id !== "message");
+    lines.push(buttonRow(local, inner, offset + lines.length, placed));
     lines.push(buttonRow(remoteButtons(), inner, offset + lines.length, placed));
     buttons = placed;
     if (busy) lines.push(`${PAD}${color(THEME.blue)}${SPINNER[frame % SPINNER.length]} ${color(THEME.muted)}${ACTIVITY[busy]}…${RESET}`);
     else if (notice) lines.push(`${PAD}${color(notice.hex)}${wrap(notice.text, inner, 1)[0]}${RESET}`);
+    else if (source.fetchHint()) for (const line of wrap(source.fetchHint(), inner, HINT_LINES)) lines.push(`${PAD}${color(THEME.muted)}${line}${RESET}`);
     if (message) for (const line of wrap(message, inner, PREVIEW_LINES)) lines.push(`${PAD}${color(THEME.text)}${line}${RESET}`);
     return lines;
   }
@@ -255,7 +262,7 @@ export function createGitSection({ selfMarker, onChange }) {
       const row = lines.length;
       rows.push({ row, top: r.top });
       const counts = [
-        r.changed ? `${color(THEME.yellow)}${r.changed} changed` : `${color(THEME.muted)}clean`,
+        r.paused ? `${color(THEME.muted)}paused` : r.changed ? `${color(THEME.yellow)}${r.changed} changed` : `${color(THEME.muted)}clean`,
         r.ahead ? `${color(THEME.green)}↑${r.ahead}` : "",
         r.behind ? `${color(THEME.blue)}↓${r.behind}` : "",
       ].filter(Boolean).join(" ");
@@ -271,6 +278,7 @@ export function createGitSection({ selfMarker, onChange }) {
   }
 
   function listLines(inner, room) {
+    if (paused()) return wrap(STATUS_OFF_HINT, inner, HINT_LINES).map((line) => `${PAD}${color(THEME.muted)}${line}${RESET}`);
     const list = files();
     if (!list.length) return [`${PAD}${color(THEME.muted)}working tree clean${RESET}`];
     const staged = list.filter(isStaged).length;
@@ -306,7 +314,7 @@ export function createGitSection({ selfMarker, onChange }) {
       return repoLines(inner, maxRows);
     }
     rows = [];
-    if (messageFor && messageFor !== repo.top) message = messageFor = null;
+    if ((messageFor && messageFor !== repo.top) || !aiMessages()) message = messageFor = null;
     const actionRows = actionLines(inner).length;
     const top = [navLine(inner), ...listLines(inner, maxRows - 1 - actionRows)];
     const padding = Number.isFinite(maxRows) ? Math.max(0, maxRows - top.length - actionRows) : 0;

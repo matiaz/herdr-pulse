@@ -1,8 +1,7 @@
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { isoDay, quartileLevels, readJson, writeJson } from "../lib/store.mjs";
-import { createLimitsSource } from "./limits.mjs";
+import { claudeConfigDir, createLimitsSource } from "./limits.mjs";
 
 const SCAN_FILE = "claude-scan.json";
 const HISTORY_FILE = "claude-history.json";
@@ -41,7 +40,7 @@ function costOf(model, usage) {
 }
 
 function transcriptsRoot() {
-  return path.join(process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), ".claude"), "projects");
+  return path.join(claudeConfigDir(), "projects");
 }
 
 function listTranscripts(root) {

@@ -1,3 +1,4 @@
+import { setting } from "../lib/settings.mjs";
 import { addDays, eachDay, isoDay } from "../lib/store.mjs";
 import { color, MARGIN, PAD, RESET, THEME } from "../lib/term.mjs";
 import { createClaudeSource } from "../sources/claude.mjs";
@@ -15,6 +16,7 @@ const MONTH_STEP_WEEKS = 4;
 const TOGGLE_LABEL = "t switch";
 const LIMIT_LABEL_WIDTH = 8;
 const LIMIT_BAR = "━";
+const LIMITS_TICK_MS = 30 * 1000;
 
 function startOfToday() {
   const now = new Date();
@@ -87,12 +89,12 @@ function limitLines(limits, columns) {
 export function createHeatmapSection({ view, save, onChange }) {
   const sources = { github: createGithubSource(), claude: createClaudeSource() };
   const order = Object.keys(sources);
-  if (!sources[view.source]) view.source = order[0];
   let pointer = null;
   let toggleHit = null;
   let columns = (process.stdout.columns || 43) - 3;
 
-  const source = () => sources[view.source];
+  const current = () => (view.sourcePicked && sources[view.source] ? view.source : sources[setting("heatmap.defaultSource")] ? setting("heatmap.defaultSource") : order[0]);
+  const source = () => sources[current()];
 
   function visibleRange() {
     const weeks = Math.max(4, Math.floor((columns - MARGIN * 2 - LABEL_WIDTH) / PITCH));
@@ -105,6 +107,7 @@ export function createHeatmapSection({ view, save, onChange }) {
   function sync(force = false) {
     const { start, end } = visibleRange();
     source().sync(start, end, onChange, { force });
+    if (source() !== sources.claude) sources.claude.limits.sync(onChange, { force });
   }
 
   function change(fn) {
@@ -115,8 +118,13 @@ export function createHeatmapSection({ view, save, onChange }) {
     sync();
   }
 
+  setInterval(() => sources.claude.limits.sync(onChange), LIMITS_TICK_MS);
+
   function switchSource() {
-    change(() => (view.source = order[(order.indexOf(view.source) + 1) % order.length]));
+    change(() => {
+      view.source = order[(order.indexOf(current()) + 1) % order.length];
+      view.sourcePicked = true;
+    });
   }
 
   function hoverLine(start, end, weeks) {

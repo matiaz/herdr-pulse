@@ -3,6 +3,8 @@ import { existsSync } from "node:fs";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { configNames, fetchOffHint, ghEnv, GIT_FLAGS, gitEnv, isPrivatePath, statusAllowed, unsafeFetchKey } from "../lib/git-safety.mjs";
+import { setting } from "../lib/settings.mjs";
 import { clean } from "../lib/term.mjs";
 
 const HERDR = process.env.HERDR_BIN_PATH || "herdr";
@@ -14,6 +16,11 @@ const PUSH_TIMEOUT_MS = 2 * 60 * 1000;
 const FETCH_TIMEOUT_MS = 60 * 1000;
 const FETCH_EVERY_MS = 2 * 60 * 1000;
 const REMOTE_EVERY_MS = 60 * 1000;
+const CONFIG_EVERY_MS = 60 * 1000;
+const MAX_DIFF_PATHS = 300;
+const LITERAL_PATHSPECS = { GIT_LITERAL_PATHSPECS: "1" };
+const STATUS_ARGS = ["status", "--porcelain=v1", "-z", "--untracked-files=all"];
+const DIFF_ARGS = ["diff", "--no-ext-diff", "--no-textconv", "--no-color", "--no-renames"];
 const PR_TITLE_MAX = 72;
 const PR_TEMPLATE_MAX_CHARS = 8000;
 const PR_TEMPLATE_DIRS = [".github/", "", "docs/"];
@@ -34,9 +41,6 @@ const PR_TEMPLATE_DESCRIPTION = [
   "replace placeholder text and HTML comments with content from the branch, tick only checklist items the commits or diff clearly support,",
   "and write N/A under a section that does not apply.",
 ].join(" ");
-const GIT_ENV = { ...process.env, GIT_OPTIONAL_LOCKS: "0", GIT_TERMINAL_PROMPT: "0" };
-const PRIVATE_PATHS = ["**/.env*", "**/*.pem", "**/*.key", "**/*.p12", "**/id_rsa*", "**/id_ed25519*", "**/*secret*", "**/*.lock", "**/*-lock.json", "**/*-lock.yaml"]
-  .map((glob) => `:(exclude,glob)${glob}`);
 const CLAUDE_FLAGS = [
   "-p",
   "--model", "haiku",
@@ -75,7 +79,7 @@ function errorLine(stderr) {
   return clean(reason.replace(/^(fatal|error): /, ""));
 }
 
-function exec(command, args, { cwd, input, env = GIT_ENV, timeout = 30 * 1000, detached = false } = {}) {
+function exec(command, args, { cwd, input, env = process.env, timeout = 30 * 1000, detached = false } = {}) {
   return new Promise((resolve, reject) => {
     const child = execFile(command, args, { cwd, env, timeout, detached, maxBuffer: 64 * 1024 * 1024 }, (error, stdout, stderr) => {
       if (error) return reject(new Error(errorLine(stderr || error.message)));
@@ -86,7 +90,8 @@ function exec(command, args, { cwd, input, env = GIT_ENV, timeout = 30 * 1000, d
   });
 }
 
-const git = (cwd, args, options) => exec("git", ["-c", "core.fsmonitor=false", "-C", cwd, ...args], options);
+const git = (cwd, args, options = {}) => exec("git", [...GIT_FLAGS, "-C", cwd, ...args], { ...options, env: { ...gitEnv(process.env), ...options.env } });
+const publicPaths = (paths) => [...new Set(paths)].filter((name) => name && !isPrivatePath(name)).slice(0, MAX_DIFF_PATHS);
 
 function githubRemote(remotes) {
   const found = remotes
@@ -105,7 +110,7 @@ function parseStatus(raw) {
     if (entry.length < 4) continue;
     const [x, y] = entry;
     if (x === "R" || x === "C") i++;
-    files.push({ x, y, path: clean(entry.slice(3)) });
+    files.push({ x, y, path: clean(entry.slice(3)), raw: entry.slice(3) });
   }
   return files;
 }
@@ -152,6 +157,9 @@ export function createGitSource({ selfMarker, onChange }) {
   let refreshing = false;
   let fetching = false;
   const fetchedAt = new Map();
+  const fetchHints = new Map();
+  const configs = new Map();
+  const configChecks = new Map();
   let remote = { key: null, info: null, at: 0 };
   let remotePending = false;
   let workspace = null;
@@ -170,6 +178,47 @@ export function createGitSource({ selfMarker, onChange }) {
   }
 
   const topLevel = async (cwd) => (await git(cwd, ["rev-parse", "--show-toplevel"])).trim();
+
+  async function gitDirs(cwd) {
+    const lines = (await git(cwd, ["rev-parse", "--git-common-dir", "--git-dir"]).catch(() => "")).split("\n").map((line) => line.trim());
+    if (!lines[0] || !lines[1]) return null;
+    return { config: path.resolve(cwd, lines[0], "config"), worktree: path.resolve(cwd, lines[1], "config.worktree") };
+  }
+
+  async function configStamp(dirs) {
+    if (!dirs) return "";
+    const parts = await Promise.all(
+      [dirs.config, dirs.worktree].map((file) => fs.stat(file).then((info) => `${info.ino}:${info.size}:${info.mtimeMs}`, () => "-")),
+    );
+    return parts.join("|");
+  }
+
+  async function readConfigKeys(cwd, dirs) {
+    const keys = configNames(await git(cwd, ["config", "--local", "--name-only", "-z", "--list"]));
+    if (!keys.includes("extensions.worktreeconfig")) return keys;
+    if (!dirs) return null;
+    const exists = await fs.lstat(dirs.worktree).then(() => true, (error) => (error?.code === "ENOENT" ? false : null));
+    if (exists === false) return keys;
+    if (exists === null) return null;
+    return [...keys, ...configNames(await git(cwd, ["config", "--worktree", "--name-only", "-z", "--list"]))];
+  }
+
+  async function configKeys(cwd) {
+    const cached = configs.get(cwd);
+    if (cached && Date.now() - cached.at < CONFIG_EVERY_MS && (await configStamp(cached.dirs)) === cached.stamp) return cached.keys;
+    if (configChecks.has(cwd)) return configChecks.get(cwd);
+    const check = (async () => {
+      const dirs = await gitDirs(cwd);
+      const stamp = await configStamp(dirs);
+      const keys = await readConfigKeys(cwd, dirs).catch(() => null);
+      configs.set(cwd, { keys, dirs, stamp, at: Date.now() });
+      return keys;
+    })().finally(() => configChecks.delete(cwd));
+    configChecks.set(cwd, check);
+    return check;
+  }
+
+  const statusPaused = async (top) => !statusAllowed(await configKeys(top));
 
   async function discover(root) {
     const candidates = [];
@@ -197,11 +246,15 @@ export function createGitSource({ selfMarker, onChange }) {
   }
 
   async function summarize(child) {
+    if (await statusPaused(child.top)) {
+      const branch = (await git(child.top, ["symbolic-ref", "--quiet", "--short", "HEAD"]).catch(() => "")).trim();
+      return { ...child, branch: clean(branch), upstream: false, ahead: 0, behind: 0, changed: 0, activity: 0, paused: true };
+    }
     const raw = await git(child.top, ["status", "--porcelain=v2", "--branch", "-z", "--untracked-files=all"]);
     const { oid, branch, paths, ...counts } = parseSummary(raw);
     const times = await Promise.all(paths.slice(0, MAX_STATS).map((file) => fs.stat(path.join(child.top, file)).then((stat) => stat.mtimeMs, () => 0)));
     const name = branch === "(detached)" ? oid.slice(0, 7) : branch;
-    return { ...child, ...counts, branch: clean(name), changed: paths.length, activity: Math.max(0, ...times) };
+    return { ...child, ...counts, branch: clean(name), changed: paths.length, activity: Math.max(0, ...times), paused: false };
   }
 
   function choose() {
@@ -223,7 +276,7 @@ export function createGitSource({ selfMarker, onChange }) {
       workspace.summarizedAt = 0;
     }
     if (now - workspace.summarizedAt >= SUMMARY_EVERY_MS) {
-      const empty = { branch: "", upstream: false, ahead: 0, behind: 0, changed: 0, activity: 0 };
+      const empty = { branch: "", upstream: false, ahead: 0, behind: 0, changed: 0, activity: 0, paused: false };
       workspace.repos = await Promise.all(workspace.children.map((child) => summarize(child).catch(() => ({ ...child, ...empty }))));
       workspace.summarizedAt = now;
     }
@@ -256,17 +309,25 @@ export function createGitSource({ selfMarker, onChange }) {
       upstream: counts !== null,
       ahead,
       behind,
+      paused: await statusPaused(top),
     };
   }
 
   const remoteKey = (r) => `${r.top}\0${r.current}\0${r.head}`;
+
+  async function safeFetch(top) {
+    const unsafe = unsafeFetchKey(await configKeys(top));
+    if (unsafe !== null) return fetchHints.set(top, fetchOffHint(unsafe));
+    fetchHints.delete(top);
+    await git(top, ["fetch", "--quiet", "--no-tags", "--no-recurse-submodules"], { timeout: FETCH_TIMEOUT_MS, detached: true });
+  }
 
   function fetchUpstream(force = false) {
     if (!repo?.upstream || fetching) return;
     if (!force && Date.now() - (fetchedAt.get(repo.top) ?? 0) < FETCH_EVERY_MS) return;
     fetching = true;
     fetchedAt.set(repo.top, Date.now());
-    git(repo.top, ["fetch", "--quiet", "--no-tags"], { timeout: FETCH_TIMEOUT_MS, detached: true })
+    safeFetch(repo.top)
       .catch(() => {})
       .finally(() => {
         fetching = false;
@@ -277,7 +338,7 @@ export function createGitSource({ selfMarker, onChange }) {
   function queryRemote(r) {
     const [owner, name] = r.slug.split("/");
     const args = ["api", "graphql", "-f", `query=${REMOTE_QUERY}`, "-f", `owner=${owner}`, "-f", `name=${name}`, "-f", `ref=refs/heads/${r.current}`, "-f", `oid=${r.head}`];
-    return exec("gh", args, { env: process.env }).then((stdout) => {
+    return exec("gh", args, { env: ghEnv(process.env) }).then((stdout) => {
       const data = JSON.parse(stdout).data?.repository;
       if (!data) throw new Error("unexpected response from gh");
       const pr = data.ref?.associatedPullRequests.nodes[0] ?? null;
@@ -316,14 +377,12 @@ export function createGitSource({ selfMarker, onChange }) {
       else await refreshWorkspace(cwd);
       const shown = top ?? workspace?.shown;
       repo = shown ? await repoAt(shown).catch(() => null) : null;
-      files = repo
-        ? parseStatus(await git(repo.top, ["status", "--porcelain=v1", "-z", "--untracked-files=all"]))
-        : [];
+      files = repo && !repo.paused ? parseStatus(await git(repo.top, STATUS_ARGS)) : [];
     } catch {
       files = [];
     } finally {
       refreshing = false;
-      const next = JSON.stringify([repo, files, workspace && [workspace.shown, workspace.repos]]);
+      const next = JSON.stringify([repo, files, workspace && [workspace.shown, workspace.repos], repo && fetchHints.get(repo.top)]);
       if (next !== signature) {
         signature = next;
         onChange();
@@ -338,12 +397,13 @@ export function createGitSource({ selfMarker, onChange }) {
   }
 
   async function describeChanges(target) {
-    const staged = files.some(isStaged);
-    const diff = await git(target.top, ["diff", "--no-ext-diff", "--no-textconv", "--no-color", ...(staged ? ["--cached"] : []), "--", ".", ...PRIVATE_PATHS]);
-    const list = files
-      .filter((file) => (staged ? isStaged(file) : true))
-      .map((file) => `${kindOf(file)} ${file.path}`)
-      .join("\n");
+    const current = target.paused ? parseStatus(await git(target.top, STATUS_ARGS)) : files;
+    if (!current.length) throw new Error("no changes");
+    const staged = current.some(isStaged);
+    const used = current.filter((file) => (staged ? isStaged(file) : true)).filter((file) => !isPrivatePath(file.raw));
+    const paths = publicPaths(used.map((file) => file.raw));
+    const diff = paths.length ? await git(target.top, [...DIFF_ARGS, ...(staged ? ["--cached"] : []), "--", ...paths], { env: LITERAL_PATHSPECS }) : "";
+    const list = used.slice(0, 100).map((file) => `${kindOf(file)} ${file.path}`).join("\n");
     return `Files:\n${list}\n\nDiff:\n${diff.slice(0, MAX_DIFF_CHARS)}`;
   }
 
@@ -376,8 +436,15 @@ export function createGitSource({ selfMarker, onChange }) {
     }
     if (!baseRef) throw new Error(`can't find ${base} on the remote: fetch it first`);
     const log = await git(target.top, ["log", "--no-color", "--format=- %s%n%b", `--max-count=${MAX_LOG_COMMITS}`, `${baseRef}..HEAD`]);
-    const stat = await git(target.top, ["diff", "--no-ext-diff", "--no-textconv", "--no-color", "--stat", `${baseRef}...HEAD`, "--", ".", ...PRIVATE_PATHS]);
-    const diff = await git(target.top, ["diff", "--no-ext-diff", "--no-textconv", "--no-color", `${baseRef}...HEAD`, "--", ".", ...PRIVATE_PATHS]);
+    const range = `${baseRef}...HEAD`;
+    const names = await git(target.top, ["diff", "--name-only", "-z", "--no-ext-diff", "--no-textconv", "--no-renames", range, "--"], { env: LITERAL_PATHSPECS });
+    const paths = publicPaths(names.split("\0"));
+    const [stat, diff] = paths.length
+      ? await Promise.all([
+        git(target.top, [...DIFF_ARGS, "--stat", range, "--", ...paths], { env: LITERAL_PATHSPECS }),
+        git(target.top, [...DIFF_ARGS, range, "--", ...paths], { env: LITERAL_PATHSPECS }),
+      ])
+      : ["", ""];
     if (!log.trim()) throw new Error(`no commits ahead of ${base}`);
     const template = await findTemplate(target.top, `refs/remotes/${baseRef}`);
     const templateText = template ? `Template:\n${template}\n\n` : "";
@@ -399,6 +466,7 @@ export function createGitSource({ selfMarker, onChange }) {
     repo: () => repo,
     files: () => files,
     remote: () => (repo && remote.key === remoteKey(repo) ? remote.info : null),
+    fetchHint: () => (repo ? fetchHints.get(repo.top) ?? null : null),
     workspace: () => (workspace?.repos.length ? { name: clean(path.basename(workspace.root)), repos: workspace.repos } : null),
     refresh,
 
@@ -411,6 +479,7 @@ export function createGitSource({ selfMarker, onChange }) {
     stageAll: (target) => git(target.top, ["add", "-A"]),
 
     async generateMessage(target) {
+      if (!setting("git.aiMessages")) throw new Error("AI messages are disabled");
       const input = await describeChanges(target);
       const output = await claude(COMMIT_ARGS, input);
       const sentence = clean(output).trim().replace(/\s+/g, " ").replace(/^["'`]+|["'`]+$/g, "");
@@ -431,16 +500,19 @@ export function createGitSource({ selfMarker, onChange }) {
     },
 
     async pull(target) {
-      await git(target.top, ["fetch", "--quiet", "--no-tags"], { timeout: FETCH_TIMEOUT_MS, detached: true });
+      await git(target.top, ["fetch", "--quiet", "--no-tags", "--no-recurse-submodules"], { timeout: FETCH_TIMEOUT_MS, detached: true });
       fetchedAt.set(target.top, Date.now());
       await git(target.top, ["merge", "--ff-only", "@{upstream}"], { timeout: COMMIT_TIMEOUT_MS });
     },
 
     async createPullRequest(target, base) {
-      const { input, templated } = await describeBranch(target, base);
-      const { title, body } = parsePullRequest(await claude(prArgs(templated), input), target.current);
-      const args = ["pr", "create", "--repo", target.slug, "--head", target.current, "--base", base, "--title", title, "--body", body];
-      const output = await exec("gh", args, { cwd: target.top, env: process.env, timeout: PUSH_TIMEOUT_MS, detached: true });
+      let args = ["pr", "create", "--fill", "--repo", target.slug, "--head", target.current, "--base", base];
+      if (setting("git.aiMessages")) {
+        const { input, templated } = await describeBranch(target, base);
+        const { title, body } = parsePullRequest(await claude(prArgs(templated), input), target.current);
+        args = ["pr", "create", "--repo", target.slug, "--head", target.current, "--base", base, "--title", title, "--body", body];
+      }
+      const output = await exec("gh", args, { cwd: target.top, env: ghEnv(process.env), timeout: PUSH_TIMEOUT_MS, detached: true });
       const url = output.trim().split("\n").find((line) => /^https:\/\/github\.com\/.+\/pull\/\d+/.test(line.trim()))?.trim();
       remote.at = 0;
       return { url, number: Number(url?.match(/\/pull\/(\d+)/)?.[1]) || null };

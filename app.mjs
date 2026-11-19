@@ -1,4 +1,6 @@
-import { readJson, writeJson } from "./lib/store.mjs";
+import fs from "node:fs";
+import path from "node:path";
+import { readJson, STATE_DIR, writeJson } from "./lib/store.mjs";
 import { color, fit, RESET, THEME, width } from "./lib/term.mjs";
 import { createGitSection } from "./sections/git.mjs";
 import { createHeatmapSection } from "./sections/heatmap.mjs";
@@ -6,8 +8,14 @@ import { createPullsSection } from "./sections/pulls.mjs";
 
 const TITLE_MARKER = `herdr-pulse ${process.pid}`;
 const POLL_MS = 60 * 1000;
+const REQUEST_POLL_MS = 1000;
+const REFRESH_REQUEST = path.join(STATE_DIR, "refresh.request");
+const CHEVRON_FROM = 3;
+const CHEVRON_TO = 5;
 
 const view = { source: "github", offset: 0, order: [], ...readJson("view.json", {}) };
+if (view.sourcePicked === undefined && view.source === "claude") view.sourcePicked = true;
+if (!view.collapsed || typeof view.collapsed !== "object" || Array.isArray(view.collapsed)) view.collapsed = {};
 const save = () => writeJson("view.json", view);
 
 let renderQueued = false;
@@ -26,6 +34,7 @@ const sections = [
   createGitSection({ selfMarker: TITLE_MARKER, onChange: requestRender }),
 ];
 const byId = Object.fromEntries(sections.map((section) => [section.id, section]));
+view.collapsed = Object.fromEntries(Object.keys(byId).filter((id) => view.collapsed[id] === true).map((id) => [id, true]));
 view.order = [...view.order.filter((id) => byId[id]), ...sections.map((s) => s.id).filter((id) => !view.order.includes(id))];
 
 let regions = [];
@@ -40,13 +49,15 @@ function visibleOrder() {
   return view.order.filter((id) => byId[id].visible?.() ?? true);
 }
 
+const isCollapsed = (section) => view.collapsed[section.id] === true;
+
 function highlighted(section) {
   return drag && (drag.id === section.id || drag.over === section.id);
 }
 
 function topBorder(section, index, count) {
   const columns = columnsNow();
-  const room = Math.max(0, columns - 11);
+  const room = Math.max(0, columns - 13);
   const title = fit(section.title(), room);
   const status = section.status();
   const statusText = status ? fit(` · ${status}`, Math.max(0, room - width(title))) : "";
@@ -54,7 +65,8 @@ function topBorder(section, index, count) {
   const edge = color(highlighted(section) ? THEME.blue : BORDER);
   const up = color(index > 0 ? THEME.muted : THEME.empty);
   const down = color(index < count - 1 ? THEME.muted : THEME.empty);
-  return `${edge}╭─ ${color(highlighted(section) ? THEME.blue : THEME.text)}${title}${color(THEME.muted)}${statusText} ${edge}${"─".repeat(fill)} ${up}↑ ${down}↓ ${edge}─╮${RESET}`;
+  const chevron = `${color(THEME.muted)}${isCollapsed(section) ? "▸" : "▾"} `;
+  return `${edge}╭─ ${chevron}${color(highlighted(section) ? THEME.blue : THEME.text)}${title}${color(THEME.muted)}${statusText} ${edge}${"─".repeat(fill)} ${up}↑ ${down}↓ ${edge}─╮${RESET}`;
 }
 
 function boxed(section, line) {
@@ -71,10 +83,11 @@ function render() {
   const rows = process.stdout.rows || 40;
   const ordered = visibleOrder().map((id) => byId[id]);
   const bodies = new Map();
-  for (const section of ordered) if (!section.flex) bodies.set(section.id, section.render(columns));
+  for (const section of ordered) if (isCollapsed(section)) bodies.set(section.id, []);
+  for (const section of ordered) if (!section.flex && !isCollapsed(section)) bodies.set(section.id, section.render(columns));
   const used = ordered.length * 2 + [...bodies.values()].reduce((n, lines) => n + lines.length, 0);
   const flexible = ordered
-    .filter((section) => section.flex)
+    .filter((section) => section.flex && !isCollapsed(section))
     .map((section) => ({ section, want: section.desiredRows?.(columns) ?? Infinity }))
     .sort((a, b) => a.want - b.want);
   let remaining = rows - used;
@@ -111,6 +124,14 @@ function moveTo(id, targetId) {
   requestRender();
 }
 
+function toggleCollapsed(id) {
+  if (view.collapsed[id]) delete view.collapsed[id];
+  else view.collapsed[id] = true;
+  save();
+  updateHover();
+  requestRender();
+}
+
 function updateHover() {
   for (const { section, top, bottom } of regions) {
     const inside = pointer && pointer.y > top && pointer.y < bottom;
@@ -143,6 +164,7 @@ function handleMouse(button, x, y, release) {
   if (y === region.top) {
     const visible = visibleOrder();
     const index = visible.indexOf(region.section.id);
+    if (x >= CHEVRON_FROM && x <= CHEVRON_TO) return toggleCollapsed(region.section.id);
     if (x === arrowsColumn() + 1) return moveTo(region.section.id, visible[index - 1]);
     if (x === arrowsColumn() + 3) return moveTo(region.section.id, visible[index + 1]);
     drag = { id: region.section.id, over: region.section.id };
@@ -153,6 +175,23 @@ function handleMouse(button, x, y, release) {
 
 function syncAll(force = false) {
   for (const section of sections) section.sync(force);
+}
+
+function requestStamp() {
+  try {
+    return fs.statSync(REFRESH_REQUEST).mtimeMs;
+  } catch {
+    return 0;
+  }
+}
+
+let requestSeen = requestStamp();
+
+function checkRefreshRequest() {
+  const stamp = requestStamp();
+  if (stamp === requestSeen) return;
+  requestSeen = stamp;
+  if (stamp) syncAll(true);
 }
 
 let pendingInput = "";
@@ -209,3 +248,4 @@ process.on("SIGHUP", shutdown);
 render();
 setTimeout(syncAll, 0);
 setInterval(syncAll, POLL_MS);
+setInterval(checkRefreshRequest, REQUEST_POLL_MS);
